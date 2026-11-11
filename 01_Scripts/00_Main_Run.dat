@@ -1,0 +1,139 @@
+; =========================================================
+;                   PIPELINE DE EXECUCAO  [v4]
+; =========================================================
+; 
+; Os dados de cada amostra (sigma3, mergulho, deformacao final, 
+; referencias do laboratorio) vem de 00_Inputs/<amostra>_params.dat.
+;
+; ORDEM: 01 amostra -> 02 foliacao -> 03 confinamento -> 04 carregamento axial.
+; PARA RODAR SO A MATRIZ (sem foliacao): usa_foliacao = 0 e comente a linha do 02 no fim.
+; [v3] Os parametros do CARREGAMENTO (atrito bola-parede e parada apos o 1o pico) ficam no inicio do 04:
+;      o model restore apaga os simbolos do Main, entao assim da para repetir so o 04 variando-os.
+; [v3.2] EIXO Z VERTICAL: o eixo do corpo de prova e z (pratos em z = +-0.064075) e o plano xy e a horizontal.
+;      Ate a v3.1 o eixo era y. Mudaram so os comandos que dependem do eixo (01 a 04); a logica e os parametros sao os mesmos.
+; [v3.3] Polimento, sem mudar a fisica: (a) a geometria (raio, altura, pratos, limiares dos vertices) fica neste arquivo,
+;      no bloco 'geometria'; (b) o log do console vai para 03_Outputs; (c) o 04 grava tambem a contagem de contatos colados
+;      (plano e matriz) a cada 500 ciclos e o arquivo de historicos passa a .txt (e texto alinhado por espacos, NAO e CSV);
+;      (d) o script 03_Outputs/00_processa_resultados.py le esse .txt, grava CSV de verdade e faz os graficos contra o lab.
+; [v3.4] (a) o servo lateral do CARREGAMENTO tem ganho e velocidade maxima maiores (parametros no inicio do 04; o 03 so ganha a variavel servo_ganho, com o mesmo valor de antes):
+;      com o ganho antigo o sigma3 chegou a +110 % no colapso do plano e demorou ~70 mil ciclos para voltar;
+;      (b) o 04 imprime onde ficam os contatos colados do plano (por anel de raio) e quanto deslizaram, no 1o pico e no fim;
+;      (c) 00_Inputs/00_gera_lote.py gera 01_Scripts/00_Lote_Run.dat para rodar varias amostras em sequencia.
+; [v3.4.1] Coesao (p_sjcoh) e atrito (p_sjfa) do plano passam a vir de cada <amostra>_params.dat (padrao: c e phi COMUNS do ajuste do plano);
+;      os valores deste arquivo ficam so como padrao. O mergulho vem do banco (anisotropy_angle_deg); sumiram foliacao_fonte e lab_ang_rupt.
+; [v3.4.2] COESAO (p_sjcoh) e RIGIDEZ (p_fjkn, p_fjks) POR AMOSTRA: o <amostra>_params.dat (00_gera_params.py --individual c --kn secante) traz o c e o kn
+;      calibrados de cada amostra; p_fjkn e p_fjks deste arquivo ficam so como padrao (quem nao e calibrada segue com eles). A leitura ja existia (call do
+;      params logo abaixo): a unica linha nova e o io.out 'Rigidez dos contatos' em define_arquivos. Nenhum comando do modelo mudou.
+; [v4] COESAO (p_sjcoh), ATRITO do plano (p_sjfa) e ATRITO RESIDUAL (p_sjfric) POR AMOSTRA, pelo LEQUE: o <amostra>_params.dat (00_gera_params.py,
+;      padrao v4) traz c e phi da reta do leque que passa no ponto da amostra (a = 0 reta de baixo, a = 1 reta de cima) e p_sjfric = tan(phi).
+;      Os valores de p_sjcoh, p_sjfa e p_sjfric deste arquivo ficam so como padrao (amostras fora das 10 do artigo). Nenhum comando do modelo mudou.
+
+model new
+program threads auto
+
+fish define parametros_globais
+    ; --- ensaio ---
+    global amostra        = 'ITA59'
+    global usa_foliacao   = 1           ; [v2] 1 = com foliacao; 0 = so matriz (comente tambem o call do 02)
+
+    ; --- padroes; o arquivo da amostra (call mais abaixo) sobrescreve estes valores abaixo ---
+    global pressao_conf   = -6.0e6      ; Pa; sigma3 (negativo = compressao)
+    global foliacao_dip   = 46.26       ; [v2] graus; mergulho da foliacao (angulo com a horizontal)
+    global eps_ax_max     = 1.2         ; [v2] %; parada pela deformacao axial dos extensometros virtuais
+    global eps_plat_max   = 3.0         ; [v2] %; parada de seguranca pela deformacao dos pratos
+    global lab_dev_pico   = 0.0         ; [v2] referencias do laboratorio (so para fazero print no console)
+    global lab_eps_pico   = 0.0         ; %
+    global lab_E_GPa      = 0.0
+    global lab_nu         = 0.0
+
+    ; --- pastas ---
+    global dir_inputs     = '../00_Inputs/'
+    global dir_params     = '00_Inputs/'   ; [v2] arquivos <amostra>_params.dat; relativo a pasta deste 00_Main_Run.dat
+    global dir_saves      = '../02_Saves/'
+    global dir_outputs    = '../03_Outputs/'
+
+    ; --- geometria (m); eixo do corpo de prova = z; os pratos sao dois 'wall generate box' ---
+    ; [v3.3] Antes estes numeros estavam espalhados nos scripts 01 a 04 (valores iguais aos da v3.2).
+    ; Se mudar um deles, confira os dependentes (comentarios abaixo); o 01 imprime uma conferencia.
+    global geo_raio       = 0.032       ; raio do corpo de prova (cilindro)
+    global geo_alt        = 0.12815     ; altura do corpo de prova
+    global geo_meia       = 0.064075    ; = geo_alt / 2: z das faces internas dos pratos (superior +, inferior -)
+    global geo_espes      = 0.001       ; espessura dos pratos
+    global geo_lado       = 0.035       ; meio lado dos pratos em x e y
+    global geo_zdist      = 0.064       ; meia altura da caixa do ball distribute (um pouco menor que geo_meia)
+    global geo_rmed       = 0.025       ; raio das esferas de medida (ids 1 e 2)
+    global geo_r_placa    = 0.034       ; vertice com r >= isto e de prato (cilindro: r = geo_raio; canto do prato: 0.0495)
+    global geo_r_cil_min  = 0.025       ; vertice de cilindro: geo_r_cil_min < r < geo_r_placa
+    global geo_z_cil      = 0.0641      ; vertice de cilindro: |z| <= isto (um pouco acima de geo_meia)
+    global geo_z_corte    = 0.05        ; vertice de prato: z > corte = prato superior; z < -corte = inferior
+    global geo_dist_atrito = 0.0005     ; faixa em torno da face interna do prato onde vale o atrito do prato
+    global geo_base       = vector(0.0, 0.0, -0.064075)   ; centro da base do cilindro (z = -geo_meia)
+    global geo_topo       = vector(0.0, 0.0, 0.064075)    ; centro do topo do cilindro (z = +geo_meia)
+
+    ; --- amostra numerica ---
+    ; Raios 1.0-2.0 mm tem Custo ~3x mais caro que 1.5-2.25 mm; para calibrar
+    ; ****vale usar 1.5-2.25 mm e refinar so na versao final.
+    global raio_min       = 0.00150     ; m
+    global raio_max       = 0.00225     ; m
+    global poro_ini       = 0.30        ; [v2] a partir de 0.25 ocorre muita sobreposicao (ball distribute) 
+    global semente        = 10001       ; Define qual o seed
+    global gap_bond       = 0.0002      ; m
+    global p_fjkn         = 6.8e12      ; [v3.4.2] Pa/m; so o padrao: o <amostra>_params.dat pode trazer o kn calibrado (E do lab); antes 1.0e13
+    global p_fjks         = 2.72e12     ; [v3.4.2] Pa/m; so o padrao (o .dat traz ks = 0.4 kn quando calibra); razao ks/kn = 0.4
+
+    ; --- foliacao (smooth joint) ---
+    global sj_band        = 0.002       ; m; meia espessura da faixa de contatos do plano
+    global p_sjcoh        = 12.0e6      ; [v3.4.1] Pa; so o padrao: o <amostra>_params.dat traz o c usado (ajuste comum: c ~ 12 MPa)
+    global p_sjten        = 5.0e6       ; Pa; SEM DADO DE LAB; entre 0 (padrao PFC) e fj_ten da matriz (12 MPa)
+    global p_sjfa         = 19.0        ; [v3.4.1] graus; so o padrao: o <amostra>_params.dat traz o phi usado (ajuste comum: phi ~ 19)
+    global p_sjfric       = 0.48        ; [v2] atrito residual; antes 0.58 (residual no lab: phi ~ 20-26 graus) | [v4] so o padrao: o .dat traz tan(phi) da amostra
+
+    ; --- carregamento axial ---
+    global vel_placa      = 5.0e-3      ; m/s por prato
+    global ciclos_max     = 1500000     ; [v3] antes 10000000 (a 1.2 % de deformacao o ensaio leva ~1.2 milhao de ciclos)
+
+    ; --- arquivos (preenchidos abaixo) ---
+    global arquivo_base   = ''
+    global modo_txt       = ''
+end
+[parametros_globais]
+
+; [v2] Dados da amostra (gerados do targets.csv). Caminho relativo a esta pasta (raiz do projeto).
+call [ dir_params + amostra + '_params.dat' ]
+
+; [v2] Arquivo que o 03 restaura e rotulo dos arquivos de saida
+fish define define_arquivos
+    if usa_foliacao = 1 then
+        arquivo_base = dir_saves + '02_Foliated_' + amostra + '.sav'
+        modo_txt     = 'Fol'
+    else
+        arquivo_base = dir_saves + '01_Sample_' + amostra + '.sav'
+        modo_txt     = 'Mat'
+    endif
+    io.out('Amostra ' + amostra + '  modo = ' + modo_txt + '  sigma3 (MPa) = ' + string(math.abs(pressao_conf) / 1.0e6) + '  mergulho = ' + string(foliacao_dip))
+    io.out('Rigidez dos contatos: kn = ' + string(p_fjkn) + ' Pa/m   ks = ' + string(p_fjks) + ' Pa/m   coesao do plano = ' + string(p_sjcoh / 1.0e6) + ' MPa')
+end
+[define_arquivos]
+
+; [v3.3] Log do console desta rodada, em 03_Outputs ao lado dos historicos (modo append: o arquivo acumula; apague-o para recomecar).
+; 
+fish define def_arq_log
+    global arquivo_log = dir_outputs + amostra + '_' + modo_txt + '_' + string(math.abs(pressao_conf) / 1.0e6) + 'MPa_Log.txt'
+end
+[def_arq_log]
+program log-file [arquivo_log]
+program log on
+
+; [v3] PARA TESTAR VALORES DE ATRITO: a partir de um 03_Confined_*.sav ja salvo:
+;   1) comente os tres calls do 01, 02 e 03 abaixo;  
+;   2) descomente a linha [def_arq_conf]
+fish define def_arq_conf
+    global arquivo_confinado = dir_saves + '03_Confined_' + amostra + '_' + modo_txt + '_' + string(math.abs(pressao_conf) / 1.0e6) + 'MPa.sav'
+end
+;[def_arq_conf]
+
+; Chamada sequencial
+call '01_Scripts/01_Geometry_Material.dat'
+call '01_Scripts/02_Foliation_SJM.dat'
+call '01_Scripts/03_Confinement_Servo.dat'
+call '01_Scripts/04_Axial_Loading.dat'

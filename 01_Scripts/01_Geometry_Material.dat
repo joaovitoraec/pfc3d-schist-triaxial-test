@@ -1,0 +1,304 @@
+model title "Ensaio Triaxial 3D - Geometria e Material"
+model domain extent -0.1 0.1 -0.1 0.1 -0.15 0.15
+
+; Semente fixa: a mesma distribuição de bolas a cada rodada
+model random [semente]
+
+; [v3.3] Conferencia da geometria vinda do Main (so imprime; ATENCAO se algum limiar ficar incoerente)
+fish define confere_geometria
+    local ok = 1
+    if math.abs(geo_meia - 0.5 * geo_alt) > 1.0e-9 then
+        ok = 0
+    endif
+    if geo_zdist >= geo_meia then
+        ok = 0
+    endif
+    if geo_r_placa <= geo_raio then
+        ok = 0
+    endif
+    if geo_r_placa >= 1.4142 * geo_lado then
+        ok = 0
+    endif
+    if geo_z_cil < geo_meia then
+        ok = 0
+    endif
+    if geo_z_corte >= geo_meia then
+        ok = 0
+    endif
+    if geo_rmed >= geo_raio then
+        ok = 0
+    endif
+    io.out('Geometria (m): raio = ' + string(geo_raio) + '  altura = ' + string(geo_alt) + '  pratos em z = +-' + string(geo_meia) + '  espessura = ' + string(geo_espes) + '  esfera de medida = ' + string(geo_rmed))
+    if ok < 1 then
+        io.out('ATENCAO: limiares da geometria incoerentes no Main (geo_*). Confira antes de seguir.')
+    endif
+end
+[confere_geometria]
+
+; CELULA TRIAXIAL E CORPO DE PROVA
+; [v3.2] Eixo do corpo de prova = z (vertical). Pratos em z = +-geo_meia; xy e a horizontal. 
+; [v3.3] medidas vindas do Main (geo_*)
+wall generate cylinder base [geo_base] axis (0, 0, 1) height [geo_alt] radius [geo_raio] cap false
+wall generate box [-geo_lado] [geo_lado] [-geo_lado] [geo_lado] [-geo_meia - geo_espes] [-geo_meia]
+wall generate box [-geo_lado] [geo_lado] [-geo_lado] [geo_lado] [geo_meia] [geo_meia + geo_espes]
+
+; Bolas: raios e porosidade vindos do Main
+ball distribute porosity [poro_ini] radius [raio_min] [raio_max] box [-geo_lado] [geo_lado] [-geo_lado] [geo_lado] [-geo_zdist] [geo_zdist]
+; Mantem so bolas com centro ao menos raio_min dentro do cilindro
+ball delete range cylinder end-1 [geo_base] end-2 [geo_topo] radius [geo_raio - raio_min] not
+
+; [v2] Conferencia imediata do numero de bolas (para raios 1.5-2.25 mm e este cilindro, ~10 mil;
+; [v3] no log do ITA16 deu 10195). Se aparecer o dobro, o 01 foi rodado sobre um modelo que ja tinha amostra.
+fish define confere_bolas
+    io.out('Bolas apos distribuir e cortar = ' + string(ball.num))
+end
+[confere_bolas]
+
+ball attribute density 2700.0 damp 0.9
+
+; =========================================================
+; [v2] ETAPA A: CONTATOS LINEARES (para aliviar a pre-tensao)
+; =========================================================
+; O ball distribute permite sobreposicao de bolas de forma irrestrita. O flat joint calcula a forca pelo
+; gap acumulado e nao "ve" a mudanca de raio, entao encolher raios com ele colado alivia
+; muito devagar (lei de potencia?). No contato linear a forca eh so geometrica: encolher o raio
+; alivia na hora. Por isso o alivio e feito ANTES de instalar o flat joint.
+contact cmat default model linear property kn 3.0e8 ks 1.2e8 fric 0.3
+
+model mechanical timestep scale
+model cycle 2000 calm 50
+
+; Esfera de medida para a tensao media (id 2; o servo do 03 usa a id 1)
+measure create id 2 radius [geo_rmed] position-x 0.0 position-y 0.0 position-z 0.0
+
+fish define params_pre
+    global tol_pre       = 0.3e6      ; Pa; tensao media aceita antes de instalar o flat joint
+    global pre_ativo     = 1          ; 1 = encolhimento ligado (desliga no fim desta etapa)
+    global pre_cont      = 0          ; verificacoes seguidas abaixo de tol_pre
+    global pre_passo     = 200        ; ciclos entre ajustes
+    global pre_eps_max   = 0.003      ; encolhimento maximo por ajuste (0.3 %)
+    global pre_ganho     = 0.7        ; fracao da tensao que cada ajuste tenta aliviar
+    global pre_E         = 5.0e9      ; Pa; modulo inicial do arranjo (depois e estimado)
+    global pre_s_ant     = 0.0        ; tensao do ajuste anterior
+    global pre_eps_ant   = 0.0        ; encolhimento do ajuste anterior
+    global pre_fator     = 1.0        ; fator acumulado aplicado aos raios
+    global pre_total_max = 0.12       ; encolhimento acumulado maximo (12 %); passou disso, para
+    global pre_falhou    = 0
+end
+[params_pre]
+
+; Tensao media (Pa), positiva na compressao
+fish define tensao_media
+    local m = measure.find(2)
+    tensao_media = -(measure.stress.xx(m) + measure.stress.yy(m) + measure.stress.zz(m)) / 3.0
+end
+
+; A cada 'pre_passo' ciclos encolhe todos os raios. O tamanho do passo vem da razao:
+; queda de tensao / encolhimento do passo anterior.
+fish define encolhe_raios
+    local s     = 0.0
+    local e_est = 0.0
+    local eps   = 0.0
+    local f     = 1.0
+    if pre_ativo = 0 then
+        exit
+    endif
+    if global.cycle % pre_passo # 0 then
+        exit
+    endif
+    s = tensao_media
+    if pre_eps_ant > 0.0 then
+        e_est = (pre_s_ant - s) / pre_eps_ant
+        if e_est < 1.0e8 then
+            e_est = 1.0e8
+        endif
+        if e_est > 2.0e11 then
+            e_est = 2.0e11
+        endif
+        pre_E = e_est
+    endif
+    pre_s_ant   = s
+    pre_eps_ant = 0.0
+    if s > tol_pre then
+        eps = pre_ganho * s / pre_E
+        if eps > pre_eps_max then
+            eps = pre_eps_max
+        endif
+        if eps < 2.0e-5 then
+            eps = 2.0e-5
+        endif
+        f = 1.0 - eps
+        if pre_fator * f < 1.0 - pre_total_max then
+            pre_falhou = 1
+        else
+            loop foreach local b ball.list
+                ball.radius(b) = ball.radius(b) * f
+            endloop
+            pre_fator   = pre_fator * f
+            pre_eps_ant = eps
+        endif
+    endif
+end
+
+; Para quando a tensao media ficar abaixo de tol_pre por 3 verificacoes seguidas (ou se falhar)
+fish define halt_pre
+    local s = 0.0
+    halt_pre = 0
+    if global.cycle % pre_passo # 0 then
+        exit
+    endif
+    s = tensao_media
+    if global.cycle % (10 * pre_passo) = 0 then
+        io.out('ciclo = ' + string(global.cycle) + '  tensao media (MPa) = ' + string(s / 1.0e6) + '  encolhimento (%) = ' + string((1.0 - pre_fator) * 100.0) + '  E estimado (GPa) = ' + string(pre_E / 1.0e9))
+    endif
+    if s <= tol_pre then
+        pre_cont = pre_cont + 1
+    else
+        pre_cont = 0
+    endif
+    if pre_cont >= 3 then
+        halt_pre = 1
+    endif
+    if pre_falhou = 1 then
+        halt_pre = 1
+    endif
+end
+
+fish callback add encolhe_raios -1
+model solve fish-halt halt_pre cycles 60000
+
+; Fim do alivio: desliga o encolhimento e tira o callback do ciclo
+fish define fim_pre
+    local s = tensao_media
+    pre_ativo = 0
+    io.out('Fim do alivio: ciclo = ' + string(global.cycle) + '  tensao media (MPa) = ' + string(s / 1.0e6) + '  encolhimento dos raios (%) = ' + string((1.0 - pre_fator) * 100.0))
+    if pre_falhou = 1 then
+        io.out('ATENCAO: o encolhimento chegou ao limite pre_total_max sem atingir tol_pre. Aumente poro_ini ou pre_total_max.')
+    endif
+    if pre_falhou < 1 then
+        if s > tol_pre then
+            io.out('ATENCAO: o alivio terminou por limite de ciclos com a tensao acima de tol_pre.')
+        endif
+    endif
+end
+[fim_pre]
+fish callback remove encolhe_raios
+
+; =========================================================
+; [v2] ETAPA B: INSTALA O FLAT JOINT E COLA
+; =========================================================
+contact cmat add 1 model flatjoint property fj_kn [p_fjkn] fj_ks [p_fjks] fj_coh 45.0e6 fj_ten 12.0e6 fj_fa 32.0 fj_fric 0.6 range contact type 'ball-ball'
+; Distancia de deteccao = gap de colagem
+contact cmat proximity [gap_bond]
+model clean
+contact cmat apply
+
+; Acomoda com o flat joint ainda descolado
+model cycle 1000 calm 50
+model solve ratio-average 1e-3 cycles 30000
+model mechanical timestep auto
+model calm
+
+; [v3] Observacao: no log do ITA16 os dois 'model solve ratio-average' abaixo (30000 e 50000 ciclos) pararam
+; no ciclo 1, porque o ratio-average ja estava em ~5e-4 (< 1e-3). Ou seja, quase nao houve ciclagem entre
+; o comando de colagem (log: 'applied to 49727 contacts') e a contagem final (31092 colados): a diferenca
+; nao pode vir do equilibrio. Os tres contadores abaixo mostram onde ela aparece (hipotese: contatos com gap > 0).
+
+; Conta contatos colados (diagnostico) [v3: detalhado]
+; Separa flat joint (bola-bola) de bola-parede e, dentro do flat joint, gap <= 0 de gap > 0.
+; Tambem mede L medio = R1+R2 e E* = fj_kn x L medio (relacao kn = E*/L da documentacao do flat joint).
+; Compare 3 momentos: antes de colar / logo apos colar / apos o equilibrio.
+fish define params_diag
+    global etapa_txt = ''
+end
+[params_diag]
+
+fish define conta_colados
+    local n_fj  = 0, n_fjc = 0
+    local n_g0  = 0, n_g0c = 0
+    local n_gp  = 0, n_gpc = 0
+    local n_out = 0
+    local sL    = 0.0
+    loop foreach local c contact.list
+        if contact.isprop(c, 'fj_kn') then
+            n_fj = n_fj + 1
+            sL = sL + ball.radius(contact.end1(c)) + ball.radius(contact.end2(c))
+            if contact.isbonded(c) then
+                n_fjc = n_fjc + 1
+            endif
+            if contact.gap(c) > 0.0 then
+                n_gp = n_gp + 1
+                if contact.isbonded(c) then
+                    n_gpc = n_gpc + 1
+                endif
+            else
+                n_g0 = n_g0 + 1
+                if contact.isbonded(c) then
+                    n_g0c = n_g0c + 1
+                endif
+            endif
+        else
+            n_out = n_out + 1
+        endif
+    endloop
+    io.out('Contatos [' + etapa_txt + '] ciclo ' + string(global.cycle))
+    io.out('   flat joint (bola-bola): colados = ' + string(n_fjc) + ' de ' + string(n_fj))
+    io.out('   com gap <= 0: colados = ' + string(n_g0c) + ' de ' + string(n_g0) + '    com gap > 0: colados = ' + string(n_gpc) + ' de ' + string(n_gp))
+    io.out('   outros (bola-parede, modelo linear): ' + string(n_out))
+    if n_fj > 0 then
+        io.out('   L medio = R1+R2 (mm) = ' + string(1000.0 * sL / n_fj) + '    E* = fj_kn x L medio (GPa) = ' + string(p_fjkn * sL / n_fj / 1.0e9))
+    endif
+end
+
+fish define conta_antes
+    etapa_txt = 'antes de colar'
+    local d = conta_colados
+end
+fish define conta_logo
+    etapa_txt = 'logo apos o comando de colagem'
+    local d = conta_colados
+end
+fish define conta_depois
+    etapa_txt = 'apos o equilibrio'
+    local d = conta_colados
+end
+
+[conta_antes]
+
+; Agora sim ele cola os contatos
+contact method bond gap [gap_bond] range contact type 'ball-ball'
+[conta_logo]
+
+; Zera deslocamentos e equilibra com limite de ciclos
+ball attribute displacement-x 0.0 displacement-y 0.0 displacement-z 0.0
+model solve ratio-average 1e-3 cycles 50000
+[conta_depois]
+
+; Resumo para conferencia no console
+; Informacoes de quantidades 
+fish define resumo_amostra
+    local nb   = ball.num
+    local vb   = 0.0
+    local r    = 0.0
+    local nc   = 0
+    local ncol = 0
+    local vcil = math.pi * geo_raio * geo_raio * geo_alt
+    loop foreach local b ball.list
+        r  = ball.radius(b)
+        vb = vb + 4.0 / 3.0 * math.pi * r * r * r
+    endloop
+    loop foreach local c contact.list
+        nc = nc + 1
+        if contact.isbonded(c) then
+            ncol = ncol + 1
+        endif
+    endloop
+    io.out('Numero de bolas             = ' + string(nb))
+    io.out('Porosidade aproximada       = ' + string(1.0 - vb / vcil))
+    io.out('Contatos (total / colados)  = ' + string(nc) + ' / ' + string(ncol))
+    io.out('Coordenacao (colados)       = ' + string(2.0 * ncol / nb))
+    io.out('Tensao media apos colar (MPa) = ' + string(tensao_media / 1.0e6))
+end
+[resumo_amostra]
+
+model save [ dir_saves + '01_Sample_' + amostra + '.sav' ]

@@ -1,0 +1,182 @@
+; [v2] Restaura o arquivo definido no Main (02_Foliated se usa_foliacao = 1; 01_Sample se 0)
+model restore [arquivo_base]
+
+; Pressao de confinamento faz a leitura da variavel global no Main_Run
+fish define servo_target_stress
+    servo_target_stress = pressao_conf 
+end
+[servo_target_stress]
+
+; Ganho do servo (mantido como estavel para a rigidez nova)
+; [v3.4] O ganho vem da variavel servo_ganho (1.0e-8, igual ao de antes) para o 04 poder muda-lo no carregamento.
+fish define params_ganho
+    global servo_ganho = 1.0e-8
+end
+[params_ganho]
+fish define servo_gain
+    servo_gain = servo_ganho
+end
+[servo_gain]
+
+; [v1] Parametros novos do servo
+;   servo_vmax     : velocidade maxima das paredes (m/s)
+;   servo_axial_on : 1 = pratos tambem sao servo-controlados
+;   conf_cont/tol  : criterio de parada (erro < 2% por 50 verificacoes seguidas)
+fish define params_servo
+    global servo_vmax     = 0.01
+    global servo_axial_on = 1
+    global conf_cont      = 0
+    global conf_tol       = 0.02
+end
+[params_servo]
+
+measure create id 1 radius [geo_rmed] position-x 0.0 position-y 0.0 position-z 0.0
+
+fish define servo_confinamento
+    ; Executa o servo apenas a cada 20 ciclos (evita excesso de processamento)
+    if global.cycle % 20 # 0 then
+        exit
+    endif
+
+    local m       = measure.find(1)
+    ; [v1] Tensao radial = media de xx e yy (antes so xx). [v3.2] Eixo axial = z
+    local sigma_r = 0.5 * (measure.stress.xx(m) + measure.stress.yy(m))
+    local sigma_a = measure.stress.zz(m)
+
+    ; [v1] Progresso no console a cada 5000 ciclos (ciclo, passo de tempo, tensoes em MPa)
+    if global.cycle % 5000 = 0 then
+        io.out('ciclo = ' + string(global.cycle) + '  dt = ' + string(global.timestep) + '  radial = ' + string(sigma_r / 1.0e6) + '  axial = ' + string(sigma_a / 1.0e6))
+    endif
+
+    ; [v1] Velocidade limitada em +-servo_vmax
+    local v_corr = servo_gain * (servo_target_stress - sigma_r)
+    if v_corr > servo_vmax then
+        v_corr = servo_vmax
+    endif
+    if v_corr < -servo_vmax then
+        v_corr = -servo_vmax
+    endif
+
+    ; [v1] Pratos: levam sigma_zz ate o alvo (antes ficavam parados e sigma1 ficava ~0.25*sigma3)
+    local v_pl = servo_gain * (servo_target_stress - sigma_a)
+    if v_pl > servo_vmax then
+        v_pl = servo_vmax
+    endif
+    if v_pl < -servo_vmax then
+        v_pl = -servo_vmax
+    endif
+
+    ; Iterar sobre os vertices das paredes
+    loop foreach local v wall.vertex.list
+        local vx = wall.vertex.pos.x(v)
+        local vy = wall.vertex.pos.y(v)
+        local vz = wall.vertex.pos.z(v)
+        local r  = math.sqrt(vx*vx + vy*vy)
+
+        ; Somente parede cilindrica (r < geo_r_placa)
+        ; [v2] Condicoes em ifs aninhados: no FISH desta versao, "and"/"or" misturado com "=" se perde
+        if math.abs(vz) <= geo_z_cil then
+            if r > geo_r_cil_min then
+                if r < geo_r_placa then
+                    wall.vertex.vel.x(v) = v_corr * (vx / r)
+                    wall.vertex.vel.y(v) = v_corr * (vy / r)
+                endif
+            endif
+        endif
+
+        ; Vertices dos pratos (r >= geo_r_placa): superior desce, inferior sobe
+        ; [v2] Antes "servo_axial_on = 1 and r >= geo_r_placa" deixava as pontas do cilindro subirem/descerem
+        ; durante o carregamento (servo_axial_on = 0)
+        if servo_axial_on > 0 then
+            if r >= geo_r_placa then
+                if vz > geo_z_corte then
+                    wall.vertex.vel.z(v) = v_pl
+                endif
+                if vz < -geo_z_corte then
+                    wall.vertex.vel.z(v) = -v_pl
+                endif
+            endif
+        endif
+    endloop
+end
+
+; [v1] Criterio de parada do adensamento (antes: 50000 ciclos fixos, sem checar a tensao)
+fish define halt_conf
+    halt_conf = 0
+    if global.cycle % 20 # 0 then
+        exit
+    endif
+    local m  = measure.find(1)
+    local sr = 0.5 * (measure.stress.xx(m) + measure.stress.yy(m))
+    local sa = measure.stress.zz(m)
+    local er = math.abs(sr - servo_target_stress) / math.abs(servo_target_stress)
+    local ea = math.abs(sa - servo_target_stress) / math.abs(servo_target_stress)
+    ; [v2] As duas tensoes (radial e axial) precisam estar dentro da tolerancia. Antes, com "and",
+    ; o ensaio parou com sigma axial = 4.6 MPa para alvo de 6 MPa (23 % de erro).
+    conf_cont = conf_cont + 1
+    if er >= conf_tol then
+        conf_cont = 0
+    endif
+    if ea >= conf_tol then
+        conf_cont = 0
+    endif
+    if conf_cont >= 50 then
+        halt_conf = 1
+    endif
+end
+
+fish callback add servo_confinamento -1
+
+; [v1] Historicos do adensamento para plotar durante a rodada (MPa, compressao positiva)
+; Curvas: tensao radial, tensao axial e o alvo (as duas primeiras devem chegar na terceira)
+fish define h03_radial
+    local m = measure.find(1)
+    h03_radial = -0.5 * (measure.stress.xx(m) + measure.stress.yy(m)) / 1.0e6
+end
+fish define h03_axial
+    h03_axial = -measure.stress.zz(measure.find(1)) / 1.0e6
+end
+fish define h03_alvo
+    h03_alvo = -servo_target_stress / 1.0e6
+end
+history interval 200
+fish history name 'conf_radial_MPa' h03_radial
+fish history name 'conf_axial_MPa'  h03_axial
+fish history name 'conf_alvo_MPa'   h03_alvo
+
+; [v1] Removidos os comandos que travavam os pratos (velocity-y 0): agora o servo comanda os pratos
+
+; [v1] Limite de ciclos aumentado (antes 50000)
+model solve fish-halt halt_conf cycles 400000
+
+; [v1] Fim do adensamento: pratos param e o servo axial desliga (o servo radial continua no ensaio)
+fish define zera_placas
+    loop foreach local v wall.vertex.list
+        local vx = wall.vertex.pos.x(v)
+        local vy = wall.vertex.pos.y(v)
+        if math.sqrt(vx*vx + vy*vy) >= geo_r_placa then
+            wall.vertex.vel.z(v) = 0.0
+        endif
+    endloop
+    servo_axial_on = 0
+end
+[zera_placas]
+
+; [v1] Conferencia no console: as duas tensoes devem estar proximas do alvo
+fish define resumo_conf
+    local m = measure.find(1)
+    io.out('Alvo (MPa)           = ' + string(servo_target_stress / 1.0e6))
+    io.out('Tensao radial (MPa)  = ' + string(0.5 * (measure.stress.xx(m) + measure.stress.yy(m)) / 1.0e6))
+    io.out('Tensao axial (MPa)   = ' + string(measure.stress.zz(m) / 1.0e6))
+    io.out('Ciclo atual          = ' + string(global.cycle))
+end
+[resumo_conf]
+
+fish define save_name
+    local conf_mpa = string(math.abs(pressao_conf) / 1e6) + 'MPa'
+    ; [v2] modo_txt (Fol/Mat) no nome para nao misturar com a rodada so da matriz
+    global arquivo_confinado = dir_saves + '03_Confined_' + amostra + '_' + modo_txt + '_' + conf_mpa + '.sav'
+end
+[save_name]
+
+model save [arquivo_confinado]

@@ -1,0 +1,738 @@
+model restore [arquivo_confinado]
+
+; Apaga os historicos do adensamento, para o CSV comecar do zero e sem colunas extras
+history delete
+
+; Zera as deformacoes iniciais (as posicoes iniciais dos extensometros vem daqui: pos - disp)
+ball attribute displacement-x 0.0 displacement-y 0.0 displacement-z 0.0
+
+; =========================================================
+; [v3] PARAMETROS DO CARREGAMENTO (definidos aqui, depois do restore)
+; =========================================================
+; O model restore apaga os simbolos FISH do Main e troca pelos do .sav. Por isso estes valores ficam
+; neste arquivo: assim da para repetir SO o 04, a partir do mesmo 03_Confined_*.sav, variando-os.
+fish define params_carga
+    ; Atrito bola-parede. Ate a v2.1 era 0.3 em tudo (herdado do alivio da pre-tensao).
+    global p_fric_prato  = 0.05    ; pratos (extremidades). SEM dado de lab: valor de teste (0.3 reproduz a v2.1)
+    global p_fric_parede = 0.0     ; cilindro lateral (membrana): nao transmite cisalhamento (0.3 reproduz a v2.1)
+    ; Parada apos o 1o pico
+    global queda_pico    = 0.90    ; 1o pico = desviador cai abaixo de 90 % do maximo ate ali
+    global pos_pico_frac = 0.5     ; para quando (ciclos apos o pico) >= pos_pico_frac x (ciclos ate o pico)
+    global pico_min      = 5.0     ; MPa; so aceita pico se o maximo passou disto (evita falso pico no inicio)
+    global pico_min_lab  = 0.5     ; com lab_dev_pico > 0, exige tambem maximo > pico_min_lab x lab_dev_pico
+    ; [v3.2] Prato superior = 2o 'wall generate box' do 01 (ids 8 a 13 no log). A forca do prato e a SOMA das 6 paredes,
+    ; assim nao importa qual face (boxWallBottom, boxWallTop...) fica voltada para a amostra. So para os historicos de forca.
+    global id_prato_ini  = 8
+    global id_prato_fim  = 13
+    global fpl_x = 0.0, fpl_y = 0.0, fpl_z = 0.0   ; forca no prato superior (preenchida por forca_prato)
+    ; [v3.4] Servo lateral durante o carregamento. O do 03 (ganho 1.0e-8, vmax 0.01 m/s) nao acompanha o bloco que desliza
+    ; pelo plano: o sigma3 chegou a +110 % (ITA40) e levou ~70 mil ciclos para voltar. Num controle proporcional, o erro
+    ; estacionario = (empurrao lateral do bloco) / ganho; com 1.5e-7 fica ~3 % no pior caso estimado (ITA40).
+    ; Para voltar ao comportamento da v3.3: servo_ganho_carga = 1.0e-8 e servo_vmax_carga = 0.01.
+    ; Se o sigma3 oscilar (serrilhado no painel 4), baixe o ganho (1.0e-7).
+    global servo_ganho_carga = 1.5e-7
+    global servo_vmax_carga  = 0.05
+    ; [v3.4] 1 = imprime o perfil do plano (colados por anel de raio) tambem no 1o pico; 0 = so no fim
+    global diag_perfil_pico  = 1
+end
+[params_carga]
+
+; [v3.4] Aplica o servo do carregamento (o servo_confinamento do 03 le servo_ganho e servo_vmax a cada 20 ciclos)
+fish define ajusta_servo
+    servo_ganho = servo_ganho_carga
+    servo_vmax  = servo_vmax_carga
+    io.out('Servo no carregamento: ganho = ' + string(servo_ganho) + '   vmax (m/s) = ' + string(servo_vmax))
+end
+[ajusta_servo]
+
+; [v3] Aplica o atrito bola-parede so ao carregamento (01 a 03 continuam com 0.3).
+; Contatos NOVOS (o prato avanca e cria contatos) recebem o valor do prato. kn e ks sao repetidos porque
+; esta regra por tipo substitui, para bola-faceta, o default do 01.
+contact cmat default model linear type ball-facet property kn 3.0e8 ks 1.2e8 fric [p_fric_prato]
+; Contatos que JA existem: todos os bola-faceta recebem o valor do cilindro...
+contact property fric [p_fric_parede] range contact type 'ball-facet'
+; ...e os das faces internas dos pratos (plano z = +-geo_meia, faixa geo_dist_atrito = 0.5 mm) recebem o do prato.
+; Conferencia: o console mostra 'Property fric set in N contacts' em cada uma das tres linhas.
+contact property fric [p_fric_prato] range contact type 'ball-facet' plane dip 0 dip-direction 0 origin [geo_topo] distance [geo_dist_atrito]
+contact property fric [p_fric_prato] range contact type 'ball-facet' plane dip 0 dip-direction 0 origin [geo_base] distance [geo_dist_atrito]
+
+; POSICAO DOS PRATOS pela media dos vertices
+fish define init_placas
+    global z_top_atual = 0.0
+    global z_bot_atual = 0.0
+    global z_top0      = 0.0
+    global z_bot0      = 0.0
+    global comp0       = geo_alt
+end
+[init_placas]
+
+fish define pos_placas
+    local st = 0.0
+    local sb = 0.0
+    local nt = 0
+    local nb = 0
+    loop foreach local v wall.vertex.list
+        local vx = wall.vertex.pos.x(v)
+        local vy = wall.vertex.pos.y(v)
+        local vz = wall.vertex.pos.z(v)
+        if math.sqrt(vx*vx + vy*vy) >= geo_r_placa then
+            if vz > geo_z_corte then
+                st = st + vz
+                nt = nt + 1
+            else if vz < -geo_z_corte then
+                sb = sb + vz
+                nb = nb + 1
+            endif
+        endif
+    endloop
+    if nt > 0 then
+        z_top_atual = st / nt
+    endif
+    if nb > 0 then
+        z_bot_atual = sb / nb
+    endif
+end
+[pos_placas]
+
+; Posicao inicial dos pratos (referencia da deformacao no eixo dos pratos pratos)
+fish define ref_placas
+    z_top0 = z_top_atual
+    z_bot0 = z_bot_atual
+end
+[ref_placas]
+
+; Servo axial desligado para os pratos
+; Pratos comandados por velocidade somente
+fish define aplica_vel_placas
+    servo_axial_on = 0
+    loop foreach local v wall.vertex.list
+        local vx = wall.vertex.pos.x(v)
+        local vy = wall.vertex.pos.y(v)
+        local vz = wall.vertex.pos.z(v)
+        if math.sqrt(vx*vx + vy*vy) >= geo_r_placa then
+            if vz > geo_z_corte then
+                wall.vertex.vel.z(v) = -vel_placa
+            else if vz < -geo_z_corte then
+                wall.vertex.vel.z(v) = vel_placa
+            endif
+        endif
+    endloop
+end
+
+; [v2] DEFORMACAO AXIAL DOS PRATOS (inclui as extremidades; so para conferencia e parada de seguranca)
+; Em %, positiva na compressao.
+fish define deformacao_axial_placa
+    local d = pos_placas
+    deformacao_axial_placa = 100.0 * ((z_top0 - z_bot0) - (z_top_atual - z_bot_atual)) / comp0
+end
+
+; =========================================================
+; [v2] EXTENSOMETROS VIRTUAIS (reproduzir o do laboratorio)
+; =========================================================
+; Axial A e B: base de 50 mm centrada no meio do corpo de prova, em lados opostos (+x e -x).
+;   Cada ponta eh a media de z das bolas de um trecho da camada externa
+;   Deformacao = variacao da distancia entre as duas pontas / distancia inicial.
+;   Radial: anel de bolas da camada externa no meio da altura; deformacao = variacao do raio medio.
+;   Os trechos sao escolhidos pela posicao INICIAL (pos - disp), entao nao precisa marcar as bolas.
+; Convencao do laboratorio (compressao positiva): radial NEGATIVA na expansao.
+fish define params_ext
+    global ext_h     = 0.025      ; m; metade da base axial (base = 50 mm)
+    global ext_dz    = 0.003      ; m; meia altura (axial, z) de cada trecho  [v3.2: era ext_dy]
+    global ext_dy    = 0.006      ; m; meia largura (transversal, y) de cada trecho  [v3.2: era ext_dz]
+    global ext_rmin  = 0.024      ; m; so bolas com raio inicial maior que isto (camada externa)
+    global ext_ciclo = -1         ; ciclo da ultima atualizacao (evita refazer o laco no mesmo ciclo)
+    global ext_base  = 0          ; 0 = ainda sem referencia inicial
+    global ext_ok    = 0
+    global ext_LA0   = 1.0
+    global ext_LB0   = 1.0
+    global ext_R0    = 1.0
+    global ext_n_at  = 0
+    global ext_n_ab  = 0
+    global ext_n_bt  = 0
+    global ext_n_bb  = 0
+    global ext_n_r   = 0
+    global ext_eps_axA = 0.0
+    global ext_eps_axB = 0.0
+    global ext_eps_ax  = 0.0
+    global ext_eps_rad = 0.0
+    global ext_eps_vol = 0.0
+end
+[params_ext]
+
+fish define ext_update
+    local sz_at = 0.0, sz_ab = 0.0, sz_bt = 0.0, sz_bb = 0.0
+    local n_at = 0, n_ab = 0, n_bt = 0, n_bb = 0
+    local sr = 0.0
+    local n_r = 0
+    local px = 0.0, py = 0.0, pz = 0.0
+    local x0 = 0.0, y0 = 0.0, z0 = 0.0, r0 = 0.0
+    local LA = 0.0, LB = 0.0, R = 0.0
+    if ext_ciclo = global.cycle then
+        exit
+    endif
+    loop foreach local b ball.list
+        px = ball.pos.x(b)
+        py = ball.pos.y(b)
+        pz = ball.pos.z(b)
+        x0 = px - ball.disp.x(b)
+        y0 = py - ball.disp.y(b)
+        z0 = pz - ball.disp.z(b)
+        r0 = math.sqrt(x0*x0 + y0*y0)
+        if r0 > ext_rmin then
+            if math.abs(z0) < ext_dz then
+                sr  = sr + math.sqrt(px*px + py*py)
+                n_r = n_r + 1
+            endif
+            if math.abs(y0) < ext_dy then
+                if x0 > 0.0 then
+                    if math.abs(z0 - ext_h) < ext_dz then
+                        sz_at = sz_at + pz
+                        n_at  = n_at + 1
+                    endif
+                    if math.abs(z0 + ext_h) < ext_dz then
+                        sz_ab = sz_ab + pz
+                        n_ab  = n_ab + 1
+                    endif
+                else
+                    if math.abs(z0 - ext_h) < ext_dz then
+                        sz_bt = sz_bt + pz
+                        n_bt  = n_bt + 1
+                    endif
+                    if math.abs(z0 + ext_h) < ext_dz then
+                        sz_bb = sz_bb + pz
+                        n_bb  = n_bb + 1
+                    endif
+                endif
+            endif
+        endif
+    endloop
+    ext_n_at = n_at
+    ext_n_ab = n_ab
+    ext_n_bt = n_bt
+    ext_n_bb = n_bb
+    ext_n_r  = n_r
+    ext_ciclo = global.cycle
+    ; Todos os trechos precisam ter bolas (ifs separados: sem "or" misturado com "=")
+    ext_ok = 1
+    if n_at < 1 then
+        ext_ok = 0
+    endif
+    if n_ab < 1 then
+        ext_ok = 0
+    endif
+    if n_bt < 1 then
+        ext_ok = 0
+    endif
+    if n_bb < 1 then
+        ext_ok = 0
+    endif
+    if n_r < 1 then
+        ext_ok = 0
+    endif
+    if ext_ok = 0 then
+        exit
+    endif
+    LA = sz_at / n_at - sz_ab / n_ab
+    LB = sz_bt / n_bt - sz_bb / n_bb
+    R  = sr / n_r
+    if ext_base = 0 then
+        ext_LA0  = LA
+        ext_LB0  = LB
+        ext_R0   = R
+        ext_base = 1
+    endif
+    ext_eps_axA = 100.0 * (ext_LA0 - LA) / ext_LA0
+    ext_eps_axB = 100.0 * (ext_LB0 - LB) / ext_LB0
+    ext_eps_ax  = 0.5 * (ext_eps_axA + ext_eps_axB)
+    ext_eps_rad = 100.0 * (ext_R0 - R) / ext_R0
+    ext_eps_vol = ext_eps_ax + 2.0 * ext_eps_rad
+end
+
+; Referencia inicial dos extensometros e conferencia do numero de bolas de cada trecho
+fish define ext_setup
+    local d = ext_update
+    io.out('Extensometros virtuais: bolas por trecho A-topo / A-base / B-topo / B-base / anel = ' + string(ext_n_at) + ' / ' + string(ext_n_ab) + ' / ' + string(ext_n_bt) + ' / ' + string(ext_n_bb) + ' / ' + string(ext_n_r))
+    if ext_ok = 0 then
+        io.out('ATENCAO: trecho de extensometro sem bolas. Aumente ext_dy, ext_dz ou reduza ext_rmin. O ensaio vai usar a deformacao dos pratos.')
+    endif
+    if ext_ok = 1 then
+        io.out('Base inicial A / B (mm) = ' + string(ext_LA0 * 1000.0) + ' / ' + string(ext_LB0 * 1000.0) + '   raio do anel (mm) = ' + string(ext_R0 * 1000.0))
+    endif
+end
+
+; Deformacao axial usada nas curvas e na parada: extensometros (ou pratos se algum trecho ficou vazio)
+fish define deformacao_axial_macro
+    local d = ext_update
+    if ext_ok = 1 then
+        deformacao_axial_macro = ext_eps_ax
+    else
+        deformacao_axial_macro = deformacao_axial_placa
+    endif
+end
+
+fish define deformacao_radial_macro
+    local d = ext_update
+    if ext_ok = 1 then
+        deformacao_radial_macro = ext_eps_rad
+    else
+        deformacao_radial_macro = 0.0
+    endif
+end
+
+fish define deformacao_vol_macro
+    deformacao_vol_macro = deformacao_axial_macro + 2.0 * deformacao_radial_macro
+end
+
+; TENSOES EM MPa, positivas na compressao (PFC usa negativo na compressao)
+fish define tensao_axial_macro
+    tensao_axial_macro = -measure.stress.zz(measure.find(1)) / 1.0e6
+end
+
+fish define tensao_conf_macro
+    local m = measure.find(1)
+    tensao_conf_macro = -0.5 * (measure.stress.xx(m) + measure.stress.yy(m)) / 1.0e6
+end
+
+fish define tensao_desv_macro
+    tensao_desv_macro = tensao_axial_macro - tensao_conf_macro
+end
+
+; Pico do desviador e pontos de 40 % e 60 % do pico do LABORATORIO (para E do modelo)
+fish define init_pico
+    global sig_pico = 0.0
+    global eps_pico = 0.0
+    global e40_ok   = 0
+    global e60_ok   = 0
+    global e40_dev = 0.0, e40_ea = 0.0, e40_er = 0.0
+    global e60_dev = 0.0, e60_ea = 0.0, e60_er = 0.0
+    ; [v3] estado do 1o pico e da parada
+    global pico1_ok        = 0           ; 1 = 1o pico travado (queda detectada)
+    global ciclo_pico      = 0           ; ciclo do maximo (amostrado a cada 500 ciclos)
+    global ciclo_ini_carga = global.cycle ; ciclo em que o carregamento comeca
+    global dev_min_pos     = 1.0e9       ; menor desviador depois do 1o pico
+    global motivo_parada   = 0           ; 0 limite de ciclos; 1 eps_ax; 2 pratos; 3 queda a 20 %; 4 limite apos o pico
+    if lab_dev_pico > 0.0 then
+        if pico_min_lab * lab_dev_pico > pico_min then
+            pico_min = pico_min_lab * lab_dev_pico
+        endif
+    endif
+end
+[init_pico]
+
+; [v3] Estado dos contatos (plano smooth joint e matriz flat joint); chamado no 1o pico e no fim
+fish define estado_contatos
+    local nsj = 0, nsjc = 0, nfj = 0, nfjc = 0, nout = 0
+    loop foreach local c contact.list
+        if contact.isprop(c, 'sj_kn') then
+            nsj = nsj + 1
+            if contact.isbonded(c) then
+                nsjc = nsjc + 1
+            endif
+        else
+            if contact.isprop(c, 'fj_kn') then
+                nfj = nfj + 1
+                if contact.isbonded(c) then
+                    nfjc = nfjc + 1
+                endif
+            else
+                nout = nout + 1
+            endif
+        endif
+    endloop
+    io.out('   ciclo ' + string(global.cycle) + ': plano SJ colados / total = ' + string(nsjc) + ' / ' + string(nsj) + '   flat joint colados / total = ' + string(nfjc) + ' / ' + string(nfj) + '   bola-parede = ' + string(nout))
+end
+
+; [v3.4] Perfil do plano de foliacao (SO MEDICAO; nao altera o modelo). Contatos do plano (smooth joint) por anel de
+; distancia ao eixo (4 aneis iguais ate geo_raio): colados / total e deslizamento medio (micrometros) entre as duas bolas do
+; contato, no plano da foliacao, desde o inicio do carregamento (os deslocamentos das bolas sao zerados no inicio do 04).
+; Leitura: colados com deslizamento ~0 e/ou concentrados num anel = trecho do plano que nao desliza.
+fish define lin_anel(i, nt, nc, sc, su)
+    local n_u = nt - nc
+    local m_c = 0.0
+    local m_u = 0.0
+    if nc > 0 then
+        m_c = 1.0e6 * sc / nc
+    endif
+    if n_u > 0 then
+        m_u = 1.0e6 * su / n_u
+    endif
+    io.out('   anel ' + string(i) + ' (r ate ' + string(1000.0 * i * geo_raio / 4.0) + ' mm): colados / total = ' + string(nc) + ' / ' + string(nt) + '   deslizamento medio (um): colados = ' + string(m_c) + '   nao colados = ' + string(m_u))
+end
+
+fish define perfil_plano
+    local a  = foliacao_dip * math.pi / 180.0
+    local nx = math.sin(a)
+    local nz = math.cos(a)
+    local t1 = 0, t2 = 0, t3 = 0, t4 = 0
+    local c1 = 0, c2 = 0, c3 = 0, c4 = 0
+    local sc1 = 0.0, sc2 = 0.0, sc3 = 0.0, sc4 = 0.0
+    local su1 = 0.0, su2 = 0.0, su3 = 0.0, su4 = 0.0
+    loop foreach local c contact.list
+        if contact.isprop(c, 'sj_kn') then
+            local b1 = contact.end1(c)
+            local b2 = contact.end2(c)
+            local xm = 0.5 * (ball.pos.x(b1) + ball.pos.x(b2))
+            local ym = 0.5 * (ball.pos.y(b1) + ball.pos.y(b2))
+            local r  = math.sqrt(xm * xm + ym * ym)
+            local dx = ball.disp.x(b2) - ball.disp.x(b1)
+            local dy = ball.disp.y(b2) - ball.disp.y(b1)
+            local dz = ball.disp.z(b2) - ball.disp.z(b1)
+            local dn = dx * nx + dz * nz
+            local tx = dx - dn * nx
+            local tz = dz - dn * nz
+            local sl = math.sqrt(tx * tx + dy * dy + tz * tz)
+            local k  = 1
+            if r >= 0.25 * geo_raio then
+                k = 2
+            endif
+            if r >= 0.5 * geo_raio then
+                k = 3
+            endif
+            if r >= 0.75 * geo_raio then
+                k = 4
+            endif
+            if k = 1 then
+                t1 = t1 + 1
+                if contact.isbonded(c) then
+                    c1 = c1 + 1
+                    sc1 = sc1 + sl
+                else
+                    su1 = su1 + sl
+                endif
+            endif
+            if k = 2 then
+                t2 = t2 + 1
+                if contact.isbonded(c) then
+                    c2 = c2 + 1
+                    sc2 = sc2 + sl
+                else
+                    su2 = su2 + sl
+                endif
+            endif
+            if k = 3 then
+                t3 = t3 + 1
+                if contact.isbonded(c) then
+                    c3 = c3 + 1
+                    sc3 = sc3 + sl
+                else
+                    su3 = su3 + sl
+                endif
+            endif
+            if k = 4 then
+                t4 = t4 + 1
+                if contact.isbonded(c) then
+                    c4 = c4 + 1
+                    sc4 = sc4 + sl
+                else
+                    su4 = su4 + sl
+                endif
+            endif
+        endif
+    endloop
+    io.out('Plano de foliacao no ciclo ' + string(global.cycle) + ', por anel de raio (so medicao):')
+    local d1 = lin_anel(1, t1, c1, sc1, su1)
+    local d2 = lin_anel(2, t2, c2, sc2, su2)
+    local d3 = lin_anel(3, t3, c3, sc3, su3)
+    local d4 = lin_anel(4, t4, c4, sc4, su4)
+end
+
+; Parada: deformacao axial maxima (extensometros), limite dos pratos, desviador caiu a 20 % do pico,
+; ou [v3] limite de ciclos apos o 1o pico (pos_pico_frac x ciclos ate o pico).
+; [v3] O 1o pico fica TRAVADO: quando o desviador cai abaixo de queda_pico x maximo, sig_pico e eps_pico
+; param de subir, mesmo que o pos-pico volte a endurecer.
+; Roda so a cada 500 ciclos (o mesmo intervalo dos historicos)
+fish define halt_axial
+    local ea = 0.0
+    local er = 0.0
+    local dv = 0.0
+    local ep = 0.0
+    local m  = 0
+    local d  = 0
+    halt_axial = 0
+    if global.cycle % 500 # 0 then
+        exit
+    endif
+    ea = deformacao_axial_macro
+    er = deformacao_radial_macro
+    dv = tensao_desv_macro
+    ep = deformacao_axial_placa
+    ; Progresso no console a cada 100000 ciclos
+    if global.cycle % 100000 = 0 then
+        io.out('ciclo = ' + string(global.cycle) + '  eps_ax ext (%) = ' + string(ea) + '  eps_ax pratos (%) = ' + string(ep) + '  desviador (MPa) = ' + string(dv))
+    endif
+    ; [v3] Acompanha o maximo ate travar o 1o pico
+    if pico1_ok < 1 then
+        if dv > sig_pico then
+            sig_pico   = dv
+            eps_pico   = ea
+            ciclo_pico = global.cycle
+        endif
+        if sig_pico > pico_min then
+            if dv < queda_pico * sig_pico then
+                pico1_ok = 1
+                io.out('1o PICO TRAVADO: ciclo = ' + string(ciclo_pico) + '  desviador (MPa) = ' + string(sig_pico) + '  eps_ax (%) = ' + string(eps_pico) + '   | agora: ciclo = ' + string(global.cycle) + '  desviador = ' + string(dv))
+                d = estado_contatos
+                if diag_perfil_pico > 0 then
+                    d = perfil_plano
+                endif
+            endif
+        endif
+    endif
+    ; Primeiros cruzamentos de 40 % e 60 % do pico do laboratorio
+    if lab_dev_pico > 0.0 then
+        if e40_ok < 1 then
+            if dv >= 0.4 * lab_dev_pico then
+                e40_dev = dv
+                e40_ea  = ea
+                e40_er  = er
+                e40_ok  = 1
+            endif
+        endif
+        if e60_ok < 1 then
+            if dv >= 0.6 * lab_dev_pico then
+                e60_dev = dv
+                e60_ea  = ea
+                e60_er  = er
+                e60_ok  = 1
+            endif
+        endif
+    endif
+    ; Criterios de parada (o primeiro que valer define o motivo)
+    if ea >= eps_ax_max then
+        m = 1
+    endif
+    if ep >= eps_plat_max then
+        if m < 1 then
+            m = 2
+        endif
+    endif
+    if sig_pico > 0.0 then
+        if dv < 0.2 * sig_pico then
+            if ea > eps_pico then
+                if m < 1 then
+                    m = 3
+                endif
+            endif
+        endif
+    endif
+    ; [v3] Depois do 1o pico: menor desviador e limite de ciclos
+    if pico1_ok > 0 then
+        if dv < dev_min_pos then
+            dev_min_pos = dv
+        endif
+        if global.cycle - ciclo_pico >= pos_pico_frac * (ciclo_pico - ciclo_ini_carga) then
+            if m < 1 then
+                m = 4
+            endif
+        endif
+    endif
+    if m > 0 then
+        halt_axial    = 1
+        motivo_parada = m
+    endif
+end
+
+; HISTORY TRACKING. Nomes iguais aos de curves.csv do laboratorio para comparar direto.
+; Amostragem a cada 500 ciclos
+fish define h_eps_ax
+    h_eps_ax = deformacao_axial_macro
+end
+fish define h_eps_rad
+    h_eps_rad = deformacao_radial_macro
+end
+fish define h_eps_vol
+    h_eps_vol = deformacao_vol_macro
+end
+fish define h_eps_axA
+    local d = deformacao_axial_macro
+    h_eps_axA = ext_eps_axA
+end
+fish define h_eps_axB
+    local d = deformacao_axial_macro
+    h_eps_axB = ext_eps_axB
+end
+fish define h_dev
+    h_dev = tensao_desv_macro
+end
+fish define h_sig1
+    h_sig1 = tensao_axial_macro
+end
+fish define h_conf
+    h_conf = tensao_conf_macro
+end
+; [v3.2] Forca de contato no prato superior (diagnostico do atrito prato-amostra)
+; A forca do prato = SOMA das 6 paredes do box (ids id_prato_ini a id_prato_fim). Na v3.1 usava so a id 8 e dava zero.
+; sigma1 pelo prato = F_axial (z) / area; comparar com sigma1_MPa (esfera central) mostra o efeito do atrito lateral
+fish define forca_prato
+    local sx = 0.0
+    local sy = 0.0
+    local sz = 0.0
+    loop local i (id_prato_ini, id_prato_fim)
+        local w = wall.find(i)
+        sx = sx + wall.force.contact.x(w)
+        sy = sy + wall.force.contact.y(w)
+        sz = sz + wall.force.contact.z(w)
+    endloop
+    fpl_x = sx
+    fpl_y = sy
+    fpl_z = sz
+end
+
+fish define h_sig1_prato
+    local d = forca_prato
+    h_sig1_prato = math.abs(fpl_z) / (math.pi * geo_raio * geo_raio) / 1.0e6
+end
+; atrito mobilizado no prato = |F lateral| / |F axial| (nao passa de p_fric_prato)
+fish define h_mu_prato
+    local d = forca_prato
+    h_mu_prato = 0.0
+    if math.abs(fpl_z) > 1.0 then
+        h_mu_prato = math.sqrt(fpl_x * fpl_x + fpl_y * fpl_y) / math.abs(fpl_z)
+    endif
+end
+
+; [v3.3] Contatos colados ao longo do ensaio (so historico; nao altera o modelo): plano smooth joint e matriz flat joint.
+; Mostra se o plano rompe por inteiro no pos-pico. A contagem roda uma vez por ciclo de amostragem (mesmo esquema do ext_update).
+fish define init_cont
+    global n_sj_col   = 0
+    global n_fj_col   = 0
+    global cont_ciclo = -1
+end
+[init_cont]
+
+fish define cont_colados
+    local nsj = 0
+    local nfj = 0
+    if cont_ciclo = global.cycle then
+        exit
+    endif
+    loop foreach local c contact.list
+        if contact.isbonded(c) then
+            if contact.isprop(c, 'sj_kn') then
+                nsj = nsj + 1
+            else
+                if contact.isprop(c, 'fj_kn') then
+                    nfj = nfj + 1
+                endif
+            endif
+        endif
+    endloop
+    n_sj_col   = nsj
+    n_fj_col   = nfj
+    cont_ciclo = global.cycle
+end
+
+fish define h_sj_col
+    local d = cont_colados
+    h_sj_col = n_sj_col
+end
+fish define h_fj_col
+    local d = cont_colados
+    h_fj_col = n_fj_col
+end
+
+history interval 500
+fish history name 'eps_ax_pct'       h_eps_ax  ;Deform. Axial 
+fish history name 'eps_rad_pct'      h_eps_rad ; Deform. Radial
+fish history name 'eps_vol_pct'      h_eps_vol ;Deform. Volumetrica
+fish history name 'dev_MPa'          h_dev     ;Deviatoric
+fish history name 'sigma1_MPa'       h_sig1    ;Tensao Axial total sigma1
+fish history name 'conf_MPa'         h_conf    ;Tensao confinante radial sigma 3
+fish history name 'eps_ax_A_pct'     h_eps_axA ;Def axial do extensometro A lado x+
+fish history name 'eps_ax_B_pct'     h_eps_axB ;Def axial do ext. B lado x-
+fish history name 'eps_ax_plat_pct'  deformacao_axial_placa 
+fish history name 'sigma1_prato_MPa' h_sig1_prato ;[v3] Sigma1 pela forca no prato superior
+fish history name 'mu_mob_prato'     h_mu_prato   ;[v3] Forca lateral / axial no prato superior (atrito mobilizado)
+fish history name 'sj_colados'       h_sj_col     ;[v3.3] Contatos colados do plano (smooth joint)
+fish history name 'fj_colados'       h_fj_col     ;[v3.3] Contatos colados da matriz (flat joint)
+
+; Referencia inicial dos extensometros
+[ext_setup]
+
+; Inicia o carregamento (o servo radial continua ativo e mantem sigma3)
+[aplica_vel_placas]
+
+; Limite de ciclos vindo do Main; para antes se atingir os criterios de parada (inclui o limite apos o 1o pico).
+; Se voce interromper o solve a mao, provavelmente o resumo, o save e o CSV no fim nao serao executados.
+model solve fish-halt halt_axial cycles [ciclos_max]
+
+; Resumo no console, com a comparacao com o laboratorio quando as referencias existem
+fish define resumo_ensaio
+    local E_mod = 0.0
+    local nu_mod = 0.0
+    local ok_E = 0
+    io.out('---------------- RESUMO DO ENSAIO ' + amostra + ' ----------------')
+    io.out('Pico do desviador (MPa)        = ' + string(sig_pico) + '   (lab: ' + string(lab_dev_pico) + ')')
+    io.out('Deformacao axial no pico (%)   = ' + string(eps_pico) + '   (lab: ' + string(lab_eps_pico) + ')')
+    io.out('Deformacao axial final (%)     = ' + string(deformacao_axial_macro) + '   pratos (%) = ' + string(deformacao_axial_placa))
+    ok_E = 0
+    if e40_ok > 0 then
+        if e60_ok > 0 then
+            if e60_ea > e40_ea then
+                ok_E = 1
+            endif
+        endif
+    endif
+    if ok_E > 0 then
+        E_mod = (e60_dev - e40_dev) / ((e60_ea - e40_ea) / 100.0) / 1000.0
+        nu_mod = -(e60_er - e40_er) / (e60_ea - e40_ea)
+        io.out('E do modelo, 40-60 % do pico do lab (GPa) = ' + string(E_mod) + '   (lab: ' + string(lab_E_GPa) + ')')
+        io.out('nu do modelo, mesmo trecho                = ' + string(nu_mod) + '   (lab: ' + string(lab_nu) + ')')
+    endif
+    if ok_E < 1 then
+        io.out('E e nu do modelo: sem pontos de 40 % e 60 % do pico do lab (lab_dev_pico = 0 ou pico do modelo menor que 60 %)')
+    endif
+    io.out('Mergulho da foliacao (graus)   = ' + string(foliacao_dip))
+    ; [v3] motivo da parada, comportamento pos-pico e atrito usado
+    local txt = 'limite de ciclos (ciclos_max)'
+    if motivo_parada = 1 then
+        txt = 'eps_ax >= eps_ax_max (extensometros)'
+    endif
+    if motivo_parada = 2 then
+        txt = 'deformacao dos pratos >= eps_plat_max'
+    endif
+    if motivo_parada = 3 then
+        txt = 'desviador caiu a 20 % do pico'
+    endif
+    if motivo_parada = 4 then
+        txt = 'limite de ciclos apos o 1o pico (pos_pico_frac)'
+    endif
+    io.out('Motivo da parada               = ' + txt)
+    if pico1_ok > 0 then
+        io.out('1o pico: ciclo = ' + string(ciclo_pico) + '   ciclos ate o pico = ' + string(ciclo_pico - ciclo_ini_carga) + '   ciclos apos o pico = ' + string(global.cycle - ciclo_pico))
+        io.out('Desviador apos o pico: minimo (MPa) = ' + string(dev_min_pos) + '   no fim (MPa) = ' + string(tensao_desv_macro))
+    endif
+    if pico1_ok < 1 then
+        io.out('Sem queda de ' + string(100.0 * (1.0 - queda_pico)) + ' % detectada: o pico acima e o maior desviador ate o fim da rodada')
+    endif
+    io.out('Atrito bola-parede usado: prato = ' + string(p_fric_prato) + '   cilindro = ' + string(p_fric_parede))
+    ; [v3.2] Conferencia da forca no prato: sigma1 pelo prato nao deve ser zero (ver forca_prato)
+    local dp = forca_prato
+    io.out('Paredes no modelo = ' + string(wall.num) + ' (esperado 13)   sigma1 pelo prato (MPa) = ' + string(math.abs(fpl_z) / (math.pi * geo_raio * geo_raio) / 1.0e6) + '   sigma1 pela esfera (MPa) = ' + string(tensao_axial_macro))
+    local d = estado_contatos
+end
+[resumo_ensaio]
+
+; Nomes de saida incluem sigma3 e o modo (Fol/Mat)
+fish define nome_saida
+    local conf_mpa = string(math.abs(pressao_conf) / 1e6) + 'MPa'
+    global arquivo_falha = dir_saves + '04_Failed_' + amostra + '_' + modo_txt + '_' + conf_mpa + '.sav'
+    global arquivo_hist  = dir_outputs + amostra + '_' + modo_txt + '_' + conf_mpa + '_Triaxial_Histories.txt'
+end
+[nome_saida]
+
+model save [arquivo_falha]
+
+; [v3.1] 'history export all' nao existe: os historicos precisam ser listados pelo nome (os mesmos de 'fish history name').
+; [v3.3] O arquivo do PFC e TEXTO ALINHADO POR ESPACOS (nao e CSV, por isso o Excel abre tudo em uma coluna): por isso a
+; extensao agora e .txt. Para CSV de verdade e graficos rode 03_Outputs/00_processa_resultados.py. A ordem das colunas abaixo
+; e a que o script espera (14 colunas; ele tambem le as 12 da v3.1/v3.2).
+; O .sav acima ja foi salvo. Se o export falhar, nao precisa repetir o ensaio: abra o PFC, de 'model restore' no
+; 04_Failed_*.sav e repita so o 'history export' (mesma lista).
+history export 'eps_ax_pct' 'eps_rad_pct' 'eps_vol_pct' 'dev_MPa' 'sigma1_MPa' 'conf_MPa' 'eps_ax_A_pct' 'eps_ax_B_pct' 'eps_ax_plat_pct' 'sigma1_prato_MPa' 'mu_mob_prato' 'sj_colados' 'fj_colados' file [arquivo_hist] truncate
+
+; [v3.4] Onde ficam os contatos colados do plano no fim da rodada (so medicao; os .sav e o export ja foram gravados)
+[perfil_plano]
+
+; [v3.3] Fecha o log do console aberto no Main (03_Outputs/<amostra>_<modo>_<sigma3>MPa_Log.txt)
+program log off

@@ -1,0 +1,13 @@
+id_ita,in_analysis,in_flow,failure_mode,use_plane_fit,confidence,sigma3_nominal_MPa,dev_peak_MPa,anisotropy_angle_deg,diameter_mm,height_mm
+ITA901,yes,yes,foliation,yes,high,3.0,113.389,28.0,64.0,128.15
+ITA902,yes,yes,foliation,yes,high,3.0,37.183,41.0,64.0,128.15
+ITA903,yes,yes,foliation,yes,high,6.0,71.149,33.0,64.0,128.15
+ITA904,yes,yes,foliation,yes,medium,6.0,37.537,47.0,64.0,128.15
+ITA905,yes,yes,foliation,yes,high,6.0,36.415,58.0,64.0,128.15
+ITA906,yes,yes,foliation,yes,medium,12.0,74.283,36.0,64.0,128.15
+ITA907,yes,yes,foliation,yes,high,12.0,42.367,52.0,64.0,128.15
+ITA908,yes,yes,foliation,yes,medium,12.0,52.525,44.0,64.0,128.15
+ITA909,yes,yes,foliation,yes,high,24.0,76.51,40.0,64.0,128.15
+ITA910,yes,yes,foliation,yes,medium,24.0,61.933,63.0,64.0,128.15
+ITA911,yes,yes,matrix,no,high,12.0,198.206,0.0,64.0,128.15
+ITA912,yes,yes,mixed,check,low,24.0,108.216,38.0,64.0,128.15

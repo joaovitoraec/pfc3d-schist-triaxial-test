@@ -1,0 +1,76 @@
+model restore [ dir_saves + '01_Sample_' + amostra + '.sav' ]
+
+
+; [v3.2] Eixo Z é o vertical: Z vale a convencao natural do PFC: dip = foliacao_dip e ddir = 90 (mergulha para +x),
+; normal = (sin(a), 0, cos(a)), a graus do eixo z.
+
+fish define calc_foliation_orientation
+    global folia_dip  = foliacao_dip
+    global folia_ddir = 90.0
+    io.out('Foliacao: mergulho = ' + string(foliacao_dip) + ' graus')
+    ; [v3.4.1] c e phi vem do params.dat da amostra; o processa_resultados.py le esta linha do log
+    io.out('Parametros do plano aplicados: c = ' + string(p_sjcoh / 1.0e6) + ' MPa   phi = ' + string(p_sjfa) + ' graus   atrito residual (sj_fric) = ' + string(p_sjfric))
+end
+[calc_foliation_orientation]
+
+; Grupo do plano por faixa de distancia
+contact group 'grupo_foliacao' range contact type 'ball-ball' plane dip [folia_dip] dip-direction [folia_ddir] origin (0.0, 0.0, 0.0) distance [sj_band]
+contact model smoothjoint range group 'grupo_foliacao'
+; Rigidez do plano = rigidez da matriz; resistencias do Main
+contact property dip [folia_dip] ddir [folia_ddir] sj_kn [p_fjkn] sj_ks [p_fjks] sj_coh [p_sjcoh] sj_ten [p_sjten] sj_fa [p_sjfa] sj_fric [p_sjfric] range group 'grupo_foliacao'
+; O smooth joint so fica colado via comando bond
+contact method bond gap [gap_bond] range group 'grupo_foliacao'
+
+; Reequilibra apos trocar o modelo de contato do plano
+model solve ratio-average 1e-3 cycles 50000
+
+
+; resumo_foliacao: so conta e imprime no log (nao muda o modelo)
+; 1) contatos do plano (grupo_foliacao): total / colados (poucos = sj_band estreita)
+; 2) desses, quantos tem gap > 0 (colados a distancia)
+; 3) flat joint fora da faixa com bolas em lados opostos do plano: total / colados
+;    (colado = a matriz ainda faz ponte entre os blocos)
+
+; [v2] Conferencia: quantos contatos o plano pegou (se for pouco, a faixa sj_band esta estreita)
+; [v3] Tambem conta (a) contatos do plano com contact.gap > 0 e (b) contatos flat joint FORA da faixa cujas
+;      duas bolas ficam em lados opostos do plano: se (b) for > 0, a matriz ainda faz ponte entre os blocos.
+fish define resumo_foliacao
+    local n_sj  = 0
+    local n_col = 0
+    local n_gp  = 0
+    local n_x   = 0
+    local n_xc  = 0
+    local a     = foliacao_dip * math.pi / 180.0
+    local nx    = math.sin(a)
+    local nz    = math.cos(a)
+    local d1    = 0.0
+    local d2    = 0.0
+    loop foreach local c contact.list
+        if contact.isgroup(c, 'grupo_foliacao') then
+            n_sj = n_sj + 1
+            if contact.isbonded(c) then
+                n_col = n_col + 1
+            endif
+            if contact.gap(c) > 0.0 then
+                n_gp = n_gp + 1
+            endif
+        else
+            if contact.isprop(c, 'fj_kn') then
+                d1 = ball.pos.x(contact.end1(c)) * nx + ball.pos.z(contact.end1(c)) * nz
+                d2 = ball.pos.x(contact.end2(c)) * nx + ball.pos.z(contact.end2(c)) * nz
+                if d1 * d2 < 0.0 then
+                    n_x = n_x + 1
+                    if contact.isbonded(c) then
+                        n_xc = n_xc + 1
+                    endif
+                endif
+            endif
+        endif
+    endloop
+    io.out('Contatos no plano (total / colados) = ' + string(n_sj) + ' / ' + string(n_col))
+    io.out('   dos quais com contact.gap > 0 = ' + string(n_gp))
+    io.out('Flat joint fora da faixa que cruzam o plano (total / colados) = ' + string(n_x) + ' / ' + string(n_xc))
+end
+[resumo_foliacao]
+
+model save [ dir_saves + '02_Foliated_' + amostra + '.sav' ]

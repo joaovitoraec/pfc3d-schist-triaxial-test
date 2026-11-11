@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Triaxial Test Guide</title>
+<style>
+:root{--bg:#f7f6f2;--card:#fff;--ink:#1d2327;--mute:#5b656b;--line:#dcdad2;--acc:#1f6f6b;--acc2:#b4531f;--code:#f0efe9}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#15191b;--card:#1d2326;--ink:#e8eaea;--mute:#98a3a8;--line:#323b3f;--acc:#4fb3ad;--acc2:#e08a58;--code:#101517}}
+:root[data-theme=dark]{--bg:#15191b;--card:#1d2326;--ink:#e8eaea;--mute:#98a3a8;--line:#323b3f;--acc:#4fb3ad;--acc2:#e08a58;--code:#101517}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:920px;margin:0 auto;padding:24px 16px 64px}
+header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+h1{font-size:1.7rem;margin:.2em 0}
+h2{font-size:1.25rem;margin:1.8em 0 .5em}
+p.lead{color:var(--mute);margin-top:0}
+button{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 12px;cursor:pointer}
+button:hover{border-color:var(--acc)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin:12px 0}
+.steps{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+.steps button[aria-selected=true]{background:var(--acc);border-color:var(--acc);color:#fff}
+pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;font:13px/1.45 ui-monospace,Menlo,Consolas,monospace;margin:8px 0}
+code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.92em}
+.row{display:grid;grid-template-columns:150px 1fr 70px;gap:8px;align-items:center;margin:4px 0;font-size:.92rem}
+.row input{width:100%;accent-color:var(--acc)}
+.out{display:flex;flex-wrap:wrap;gap:16px;margin:10px 0;font-size:.95rem}
+.out b{font-size:1.15rem;color:var(--acc)}
+svg{width:100%;height:auto;display:block}
+svg text{fill:var(--mute);font-size:11px}
+.note{color:var(--mute);font-size:.9rem}
+a{color:var(--acc)}
+@media(max-width:560px){.row{grid-template-columns:110px 1fr 56px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div>
+    <h1>Triaxial test on foliated rock: a step-by-step guide</h1>
+    <p class="lead">How the PFC3D model is built, how the foliation plane is given its strength, and how to read the result. No lab data is used here.</p>
+  </div>
+  <button id="theme" aria-label="Toggle light and dark theme">Theme</button>
+</header>
+
+<h2>1. The five scripts</h2>
+<p>Click a step. Each script saves the model state, and the next one restores it.</p>
+<div class="steps" role="tablist" id="steps"></div>
+<div class="card" id="stepbox" aria-live="polite"></div>
+
+<h2>2. Stress on the foliation plane</h2>
+<p>Move the sliders. The plane slides when the shear stress reaches <code>c + sn tan(phi)</code>. The page computes the deviator at which this happens.</p>
+<div class="card">
+  <div id="s1"></div>
+  <div class="out" id="o1"></div>
+  <svg id="mohr" viewBox="0 0 520 260" role="img" aria-label="Mohr diagram with the Coulomb line and the point of the plane"></svg>
+  <p class="note"><code>sn = sigma3 + D cos^2(dip)</code>, <code>tau = D sin(dip) cos(dip)</code>, and at the peak <code>D = (c + sigma3 tan(phi)) / (sin(dip) cos(dip) - cos^2(dip) tan(phi))</code>.</p>
+</div>
+
+<h2>3. Cohesion of one specimen</h2>
+<p>One test gives one point (sn, tau), so only one parameter per specimen can be set. Keep <code>phi</code> and compute <code>c_i = tau - sn tan(phi)</code>. Move the sliders to place the point.</p>
+<div class="card">
+  <div id="s3"></div>
+  <div class="out" id="o3"></div>
+</div>
+
+<h2>4. The smooth-joint contact law</h2>
+<p>Each plane contact is bonded until the shear force reaches the Coulomb limit. Then it keeps only friction.</p>
+<div class="card">
+  <div id="s4"></div>
+  <svg id="sj" viewBox="0 0 520 240" role="img" aria-label="Shear stress against shear displacement of a smooth-joint contact"></svg>
+  <p class="note">If the normal stress becomes tensile and larger than <code>sj_ten</code>, the bond breaks in tension and no shear is carried.</p>
+</div>
+
+<h2>5. Run it yourself</h2>
+<p>The Python tools run on the synthetic data without PFC. See the <a href="../README.md">README</a> and the notebooks in <a href="../notebooks">notebooks/</a>.</p>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+try{const t=localStorage.getItem('theme');if(t)document.documentElement.dataset.theme=t}catch(e){}
+$('theme').onclick=()=>{const d=document.documentElement;const dark=d.dataset.theme?d.dataset.theme==='dark':matchMedia('(prefers-color-scheme:dark)').matches;d.dataset.theme=dark?'light':'dark';try{localStorage.setItem('theme',d.dataset.theme)}catch(e){}draw()};
+
+const STEPS=[
+ {t:'00 Main',f:'00_Main_Run.dat',d:'Holds every global parameter (sample size, stiffness, plane strength, loading speed) and the specimen id. The id selects a params file that overrides the defaults. At the end it calls the four stages in order.',c:"global amostra = 'ITA901'\nglobal p_fjkn  = 6.8e12   ; Pa/m, matrix normal stiffness\nglobal sj_band = 0.002    ; m, half-thickness of the plane band\ncall '01_Scripts/01_Geometry_Material.dat'\ncall '01_Scripts/02_Foliation_SJM.dat'\ncall '01_Scripts/03_Confinement_Servo.dat'\ncall '01_Scripts/04_Axial_Loading.dat'"},
+ {t:'01 Geometry',f:'01_Geometry_Material.dat',d:'Builds the cylinder and two platens, fills the cylinder with random spheres, and shrinks the radii with linear contacts until the initial overlap stress is small. Then it installs the flat-joint bonds that make the rock matrix.',c:"contact cmat add 1 model flatjoint property fj_kn [p_fjkn] fj_ks [p_fjks] ...\n    fj_coh 45.0e6 fj_ten 12.0e6 fj_fa 32.0 fj_fric 0.6 range contact type 'ball-ball'\ncontact cmat proximity [gap_bond]\ncontact cmat apply"},
+ {t:'02 Foliation',f:'02_Foliation_SJM.dat',d:'Selects the contacts within sj_band of a plane through the centre, at the specimen dip, and changes them to the smooth-joint model. This removes the roughness of the particles, so sliding follows the plane.',c:"contact group 'grupo_foliacao' range contact type 'ball-ball' plane dip [folia_dip] ...\ncontact model smoothjoint range group 'grupo_foliacao'\ncontact property dip [folia_dip] ddir [folia_ddir] sj_kn [p_fjkn] sj_coh [p_sjcoh] ...\ncontact method bond gap [gap_bond] range group 'grupo_foliacao'"},
+ {t:'03 Confinement',f:'03_Confinement_Servo.dat',d:'A servo moves the lateral wall and the platens with a velocity proportional to the stress error, until the radial and axial stress stay within the tolerance for 50 checks in a row.',c:"local v_corr = servo_gain * (servo_target_stress - sigma_r)\nif v_corr >  servo_vmax then v_corr =  servo_vmax\nif v_corr < -servo_vmax then v_corr = -servo_vmax"},
+ {t:'04 Loading',f:'04_Axial_Loading.dat',d:'The platens move at constant speed. Virtual extensometers measure strain like in the lab. Histories are saved every 500 cycles. The first peak is locked when the deviator drops below a fraction of its maximum. Then the run stops and exports the results.',c:"fish define halt_axial\n    ; runs every 500 cycles\n    ; tracks the maximum deviator until the first peak is locked\nend"}
+];
+const sb=$('steps');
+STEPS.forEach((s,i)=>{const b=document.createElement('button');b.textContent=s.t;b.setAttribute('role','tab');b.onclick=()=>pick(i);sb.appendChild(b)});
+function pick(i){[...sb.children].forEach((b,j)=>b.setAttribute('aria-selected',i===j));const s=STEPS[i];
+ $('stepbox').innerHTML='<b>'+s.f+'</b><p>'+s.d+'</p><pre></pre><p class="note">Simplified excerpt. The full code is in <code>01_Scripts/'+s.f+'</code> and in notebook 00.</p>';
+ $('stepbox').querySelector('pre').textContent=s.c}
+pick(0);
+
+function slider(host,defs,cb){const el=$(host);el.innerHTML='';const v={};
+ defs.forEach(d=>{v[d.k]=d.v;const r=document.createElement('div');r.className='row';
+  r.innerHTML='<label for="'+host+d.k+'">'+d.l+'</label><input id="'+host+d.k+'" type="range" min="'+d.min+'" max="'+d.max+'" step="'+d.s+'" value="'+d.v+'"><span></span>';
+  const i=r.querySelector('input'),o=r.querySelector('span');o.textContent=d.v;
+  i.oninput=()=>{v[d.k]=+i.value;o.textContent=i.value;cb(v)};el.appendChild(r)});return v}
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||'#888';
+const rad=x=>x*Math.PI/180;
+
+let V1;
+function draw1(v){V1=v;const th=rad(v.dip),t=Math.tan(rad(v.phi));
+ const den=Math.sin(th)*Math.cos(th)-Math.cos(th)**2*t;
+ const ok=den>1e-6,D=ok?(v.c+v.s3*t)/den:NaN;
+ const sn=ok?v.s3+D*Math.cos(th)**2:NaN,tau=ok?D*Math.sin(th)*Math.cos(th):NaN;
+ $('o1').innerHTML=ok?'<span>Peak deviator <b>'+D.toFixed(1)+' MPa</b></span><span>sn <b>'+sn.toFixed(1)+'</b></span><span>tau <b>'+tau.toFixed(1)+'</b></span>'
+  :'<span>The plane cannot slide at this dip (dip is not above phi). The matrix controls the strength.</span>';
+ const W=520,H=260,mx=ok?Math.max(80,sn*1.3):80,my=mx*0.6;
+ const X=a=>40+a/mx*(W-60),Y=a=>H-30-a/my*(H-50);
+ let s='<line x1="40" y1="'+(H-30)+'" x2="'+(W-10)+'" y2="'+(H-30)+'" stroke="'+css('--line')+'"/><line x1="40" y1="10" x2="40" y2="'+(H-30)+'" stroke="'+css('--line')+'"/>';
+ s+='<line x1="'+X(0)+'" y1="'+Y(v.c)+'" x2="'+X(mx)+'" y2="'+Y(v.c+mx*t)+'" stroke="'+css('--acc2')+'" stroke-width="2"/>';
+ if(ok){const cx=(2*v.s3+D)/2,r=D/2;let p='';for(let a=0;a<=180;a+=3){p+=(a?'L':'M')+X(cx+r*Math.cos(rad(a)))+','+Y(r*Math.sin(rad(a)))}
+  s+='<path d="'+p+'" fill="none" stroke="'+css('--mute')+'" stroke-dasharray="4 3"/><circle cx="'+X(sn)+'" cy="'+Y(tau)+'" r="5" fill="'+css('--acc')+'"/>'}
+ s+='<text x="'+(W-120)+'" y="'+(H-12)+'">normal stress (MPa)</text><text x="46" y="20">shear stress (MPa)</text>';
+ $('mohr').innerHTML=s}
+V1=slider('s1',[{k:'s3',l:'sigma3 (MPa)',min:0,max:30,s:1,v:12},{k:'dip',l:'dip (deg)',min:5,max:85,s:1,v:40},{k:'c',l:'cohesion c (MPa)',min:0,max:25,s:.5,v:10},{k:'phi',l:'friction phi (deg)',min:5,max:40,s:.5,v:22}],draw1);
+
+function draw3(v){const t=Math.tan(rad(v.phi));const ci=v.tau-v.sn*t;
+ $('o3').innerHTML='<span>tan(phi) = <b>'+t.toFixed(3)+'</b></span><span>c_i = tau - sn tan(phi) = <b>'+ci.toFixed(2)+' MPa</b></span><span class="note">Change phi: the same point gives another c_i.</span>'}
+slider('s3',[{k:'sn',l:'sn of the test (MPa)',min:5,max:80,s:.5,v:40},{k:'tau',l:'tau of the test (MPa)',min:5,max:45,s:.5,v:24},{k:'phi',l:'fixed phi (deg)',min:5,max:35,s:.5,v:19}],draw3);
+draw3({sn:40,tau:24,phi:19});
+
+function draw4(v){const t=Math.tan(rad(v.phi));const W=520,H=240,ks=2.72;
+ const peak=v.c+v.sn*t,res=Math.max(0,v.mu*v.sn),tens=v.sn<0&&-v.sn>v.ten;
+ const xmax=Math.max(peak,res,1)*1.4/ks;const X=a=>40+a/xmax*(W-60),Ymax=Math.max(peak,res,1)*1.3,Y=a=>H-30-a/Ymax*(H-50);
+ let p='',tau=0,bonded=!tens;const N=200;
+ for(let i=0;i<=N;i++){const d=xmax*i/N;const trial=ks*d;
+  if(bonded){if(trial>=peak)bonded=false;}
+  tau=bonded?trial:Math.min(trial,res>0?res:0);
+  p+=(i?'L':'M')+X(d)+','+Y(Math.max(tau,0))}
+ let s='<line x1="40" y1="'+(H-30)+'" x2="'+(W-10)+'" y2="'+(H-30)+'" stroke="'+css('--line')+'"/><line x1="40" y1="10" x2="40" y2="'+(H-30)+'" stroke="'+css('--line')+'"/>';
+ s+='<path d="'+p+'" fill="none" stroke="'+css('--acc')+'" stroke-width="2"/>';
+ s+='<line x1="40" x2="'+(W-10)+'" y1="'+Y(Math.max(peak,0))+'" y2="'+Y(Math.max(peak,0))+'" stroke="'+css('--mute')+'" stroke-dasharray="4 3"/><text x="'+(W-210)+'" y="'+(Y(Math.max(peak,0))-4)+'">bonded: c + sn tan(phi) = '+peak.toFixed(1)+' MPa</text>';
+ s+='<line x1="40" x2="'+(W-10)+'" y1="'+Y(res)+'" y2="'+Y(res)+'" stroke="'+css('--acc2')+'" stroke-dasharray="4 3"/><text x="'+(W-210)+'" y="'+(Y(res)-4)+'">residual: mu sn = '+res.toFixed(1)+' MPa</text>';
+ if(tens)s+='<text x="60" y="40" style="fill:'+css('--acc2')+'">Tension above sj_ten: the bond is broken before any shear.</text>';
+ s+='<text x="'+(W-210)+'" y="'+(H-12)+'">shear displacement (micrometres)</text><text x="46" y="20">shear stress (MPa)</text>';
+ $('sj').innerHTML=s}
+slider('s4',[{k:'sn',l:'normal stress (MPa)',min:-8,max:40,s:.5,v:10},{k:'c',l:'cohesion (MPa)',min:0,max:25,s:.5,v:10},{k:'phi',l:'phi (deg)',min:5,max:40,s:.5,v:22},{k:'mu',l:'mu after break',min:.1,max:1,s:.01,v:.48},{k:'ten',l:'sj_ten (MPa)',min:0,max:12,s:.5,v:5}],draw4);
+draw4({sn:10,c:10,phi:22,mu:.48,ten:5});
+function draw(){draw1(V1)}
+draw();
+</script>
+</body>
+</html>

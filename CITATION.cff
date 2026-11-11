@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite it as below."
+title: "pfc3d-schist-triaxial-test: a PFC3D workflow for triaxial tests on foliated rock"
+type: software
+authors:
+  - family-names: "Castro"
+    given-names: "João"
+repository-code: "https://github.com/joaovitoraec/pfc3d-schist-triaxial-test"
+# license: to be defined by the author
+# doi: to be added after the first release (for example through Zenodo)

@@ -1,0 +1,13 @@
+id_ita,sheet,in_analysis,in_flow,failure_mode,use_plane_fit,confidence,tab_group,sigma3_target_MPa,sigma3_at_peak_MPa,dev_peak_MPa,sigma1_peak_MPa,eps_ax_peak_pct,eps_rad_peak_pct,eps_vol_peak_pct,time_to_peak_s,E_manual_GPa,E_fit_40_60_GPa,E_manual_over_fit,nu_manual,nu_fit_40_60,dev_residual_auto_MPa,residual_over_peak,residual_window_rel_spread,residual_status_visual,dev_residual_ppt_MPa,eps_ax_at_residual_pct,anisotropy_angle_deg,beta_plane_to_axis_deg,sigma_n_plane_MPa,tau_plane_MPa,stage2_axial_strain_rate_pct_per_s,peak_reliable,eps_peak_reliable
+ITA901,,yes,yes,foliation,yes,high,,3.0,3.0,113.389,116.389,0.6139,,,,,23.09,,,0.262,51.025,0.45,,,,,28.0,62.0,91.398,47.002,,yes,yes
+ITA902,,yes,yes,foliation,yes,high,,3.0,3.0,37.183,40.183,0.197,,,,,23.59,,,0.356,16.733,0.45,,,,,41.0,49.0,24.179,18.411,,yes,yes
+ITA903,,yes,yes,foliation,yes,high,,6.0,6.0,71.149,77.149,0.3562,,,,,24.97,,,0.334,32.017,0.45,,,,,33.0,57.0,56.044,32.499,,yes,yes
+ITA904,,yes,yes,foliation,yes,medium,,6.0,6.0,37.537,43.537,0.2338,,,,,20.07,,,0.307,16.892,0.45,,,,,47.0,43.0,23.459,18.723,,yes,yes
+ITA905,,yes,yes,foliation,yes,high,,6.0,6.0,36.415,42.415,0.225,,,,,20.23,,,0.394,16.387,0.45,,,,,58.0,32.0,16.226,16.365,,yes,yes
+ITA906,,yes,yes,foliation,yes,medium,,12.0,12.0,74.283,86.283,0.3601,,,,,25.79,,,0.278,33.428,0.45,,,,,36.0,54.0,60.619,35.324,,yes,yes
+ITA907,,yes,yes,foliation,yes,high,,12.0,12.0,42.367,54.367,0.2058,,,,,25.73,,,0.386,19.065,0.45,,,,,52.0,38.0,28.059,20.555,,yes,yes
+ITA908,,yes,yes,foliation,yes,medium,,12.0,12.0,52.525,64.525,0.3154,,,,,20.81,,,0.395,23.636,0.45,,,,,44.0,46.0,39.179,26.246,,yes,yes
+ITA909,,yes,yes,foliation,yes,high,,24.0,24.0,76.51,100.51,0.4182,,,,,22.87,,,0.27,34.429,0.45,,,,,40.0,50.0,68.898,37.674,,yes,yes
+ITA910,,yes,yes,foliation,yes,medium,,24.0,24.0,61.933,85.933,0.2828,,,,,27.38,,,0.281,27.87,0.45,,,,,63.0,27.0,36.765,25.052,,yes,yes
+ITA911,,yes,yes,matrix,no,high,,12.0,12.0,198.206,210.206,0.5899,,,,,42.0,,,0.278,168.475,0.85,,,,,0.0,90.0,210.206,0.0,,yes,yes
+ITA912,,yes,yes,mixed,check,low,,24.0,24.0,108.216,132.216,0.6405,,,,,21.12,,,0.399,59.519,0.55,,,,,38.0,52.0,91.198,52.501,,yes,yes
