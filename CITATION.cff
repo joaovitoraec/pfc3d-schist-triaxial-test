@@ -6,5 +6,5 @@ authors:
   - family-names: "Castro"
     given-names: "João"
 repository-code: "https://github.com/joaovitoraec/pfc3d-schist-triaxial-test"
-# license: to be defined by the author
+license: MIT
 # doi: to be added after the first release (for example through Zenodo)
